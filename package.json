@@ -1,0 +1,24 @@
+{
+  "name": "vibescore",
+  "version": "0.1.0",
+  "description": "Measure what a Claude Code project actually cost to build, for listing on VibeScore.",
+  "type": "module",
+  "bin": {
+    "vibescore": "index.mjs"
+  },
+  "files": [
+    "index.mjs",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "ccusage",
+    "vibescore",
+    "ai-coding",
+    "token-usage"
+  ]
+}
