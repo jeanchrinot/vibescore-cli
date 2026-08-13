@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- * vibescore — measure what a Claude Code project actually cost to build.
+ * vibescore-cli — measure what a Claude Code project actually cost to build.
  *
- *   npx vibescore | pbcopy      # macOS
- *   npx vibescore | Set-Clipboard   # Windows PowerShell
+ *   npx --yes vibescore-cli | pbcopy      # macOS
+ *   npx --yes vibescore-cli | Set-Clipboard   # Windows PowerShell
  *
  * Reads the session transcripts Claude Code already keeps in
  * ~/.claude/projects and reports one entry per project.
@@ -286,7 +286,21 @@ function runCcusage() {
         for (const s of sessions) {
           const id = s.sessionId ?? s.period;
           const cost = s.totalCost ?? s.costUSD ?? s.cost;
-          if (id && typeof cost === "number") bySession.set(id, cost);
+          if (!id || typeof cost !== "number") continue;
+
+          // ccusage already prices each model separately within a session;
+          // keep that breakdown so it can be apportioned the same way as the
+          // session total below, instead of collapsing to one number here.
+          const models = new Map();
+          for (const breakdown of s.modelBreakdowns ?? []) {
+            const modelName = breakdown.modelName ?? breakdown.model;
+            const modelCost = breakdown.cost ?? breakdown.costUSD;
+            if (modelName && typeof modelCost === "number") {
+              models.set(modelName, (models.get(modelName) ?? 0) + modelCost);
+            }
+          }
+
+          bySession.set(id, { total: cost, models });
         }
         resolve(bySession);
       } catch {
@@ -341,9 +355,15 @@ async function main() {
     if (event.usage) {
       addUsage(group.tokens, event.usage);
 
+      // Claude Code tags a few internal, non-billed turns (auto-compaction,
+      // interrupts) with model "<synthetic>" and a zero-valued usage object.
+      // It is real JSON, not a bug in the transcript, but it isn't a model —
+      // counting it inflated "models used" by one with nothing to show for it.
       const model = event.model ?? "unknown";
-      if (!group.byModel.has(model)) group.byModel.set(model, emptyTokens());
-      addUsage(group.byModel.get(model), event.usage);
+      if (model !== "<synthetic>") {
+        if (!group.byModel.has(model)) group.byModel.set(model, emptyTokens());
+        addUsage(group.byModel.get(model), event.usage);
+      }
 
       if (event.sessionId) {
         const before = group.tokensBySession.get(event.sessionId) ?? 0;
@@ -378,16 +398,26 @@ async function main() {
       // Summing the whole session into every project it touched would have
       // reported the same $288 against four different builds.
       let totalCost = null;
+      const costByModel = new Map();
       if (costBySession) {
         totalCost = sessionIds.reduce((sum, id) => {
-          const sessionCost = costBySession.get(id);
-          if (sessionCost === undefined) return sum;
+          const session = costBySession.get(id);
+          if (!session) return sum;
 
           const mine = group.tokensBySession.get(id) ?? 0;
           const whole = sessionTotals.get(id) ?? 0;
           const share = whole > 0 ? mine / whole : 0;
 
-          return sum + sessionCost * share;
+          // Same share as the total above, applied per model, so the two
+          // always add back up to the same number.
+          for (const [modelName, modelCost] of session.models) {
+            costByModel.set(
+              modelName,
+              (costByModel.get(modelName) ?? 0) + modelCost * share,
+            );
+          }
+
+          return sum + session.total * share;
         }, 0);
       }
 
@@ -403,7 +433,11 @@ async function main() {
         totalCost,
         tokens: group.tokens,
         modelBreakdowns: [...group.byModel.entries()].map(
-          ([modelName, tokens]) => ({ modelName, ...tokens }),
+          ([modelName, tokens]) => ({
+            modelName,
+            ...tokens,
+            cost: costByModel.get(modelName) ?? 0,
+          }),
         ),
         sessionIds,
       };

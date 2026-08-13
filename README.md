@@ -1,12 +1,12 @@
-# vibescore
+# vibescore-cli
 
 Measure what a Claude Code project actually cost to build, then list it on
 [VibeScore](https://vibescore.dev).
 
 ```bash
-npx vibescore | pbcopy          # macOS
-npx vibescore | Set-Clipboard   # Windows PowerShell
-npx vibescore | xclip -selection clipboard   # Linux
+npx --yes vibescore-cli | pbcopy          # macOS
+npx --yes vibescore-cli | Set-Clipboard   # Windows PowerShell
+npx --yes vibescore-cli | xclip -selection clipboard   # Linux
 ```
 
 Paste the result on the submit page. A human-readable summary is printed to

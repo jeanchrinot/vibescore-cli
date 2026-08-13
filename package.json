@@ -1,10 +1,10 @@
 {
-  "name": "vibescore",
-  "version": "0.1.0",
+  "name": "vibescore-cli",
+  "version": "0.1.2",
   "description": "Measure what a Claude Code project actually cost to build, for listing on VibeScore.",
   "type": "module",
   "bin": {
-    "vibescore": "index.mjs"
+    "vibescore-report": "index.mjs"
   },
   "files": [
     "index.mjs",
