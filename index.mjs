@@ -6,20 +6,28 @@
  *   npx --yes vibescore-cli | Set-Clipboard   # Windows PowerShell
  *
  * Reads the session transcripts Claude Code already keeps in
- * ~/.claude/projects and reports one entry per project.
+ * ~/.claude/projects and reports on one project: whichever folder you ran
+ * this command from (that folder and anything nested under it — every
+ * transcript line carries the `cwd` it was written from, so this is exact,
+ * not a guess). Run it from the project you're actually submitting.
  *
  * Why this exists rather than just using ccusage: ccusage reports only when a
  * session *ended* and does not say which project it belonged to. That leaves
  * two holes this closes.
  *
- *   Grouping   Every transcript line carries `cwd`, so projects are exact
- *              instead of the submitter hand-picking session ids on the site.
- *   Time       Every line carries a `timestamp`, so a build has a real start
- *              and end — even a single-session one, which ccusage alone can
- *              only report as "unmeasurable".
+ *   Scoping   Every transcript line carries `cwd`, so which sessions belong
+ *             to this project is exact — no picking session ids off a list,
+ *             and no "which of these fifteen projects is this one" either.
+ *   Time      Every line carries a `timestamp`, so a build has a real start
+ *             and end — even a single-session one, which ccusage alone can
+ *             only report as "unmeasurable".
  *
- * Cost still comes from ccusage, which maintains the per-model price table.
- * The two are joined on session id.
+ * Cost comes from ccusage, which maintains the per-model price table, joined
+ * on session id. Computing it still reads every transcript on the machine,
+ * not just this project's — a Claude Code session that touched several
+ * directories has its cost split by each directory's share of that
+ * session's tokens, and getting the share right needs the session's *whole*
+ * footprint, not just the part that happened here.
  *
  * Nothing here leaves your machine. The command prints to stdout; you choose
  * what to paste. Filesystem paths are deliberately *not* included in the
@@ -77,74 +85,19 @@ function projectKeyFor(cwd) {
   return path.toLowerCase();
 }
 
+/**
+ * True for the root directory itself and anything nested under it — a repo
+ * worked on from a subdirectory (`cd packages/api && claude`) still counts
+ * as part of the project you ran this command from.
+ */
+function isWithinRoot(cwd, rootKey) {
+  const key = projectKeyFor(cwd);
+  return key === rootKey || key.startsWith(`${rootKey}/`);
+}
+
 function folderName(cwd) {
   const parts = cwd.replace(/\\/g, "/").replace(/\/+$/, "").split("/");
   return parts[parts.length - 1] || cwd;
-}
-
-function pathSegments(cwd) {
-  return cwd.replace(/\\/g, "/").replace(/\/+$/, "").split("/").filter(Boolean);
-}
-
-/**
- * Folder names collide — two clients can each have a `components/forms`.
- *
- * Widens one segment at a time and only for the labels that actually clash,
- * so the common case stays a bare folder name and a genuine collision gets
- * exactly enough parent directories to tell it apart. Stops at four segments
- * rather than printing an entire home directory into the picker.
- */
-function disambiguateLabels(projects) {
-  // Depth is per project, not global. Widening everyone to the depth the
-  // worst collision needs turns every label into a path — one clashing pair
-  // of `forms` directories shouldn't rename `vibeboard` to
-  // `personal/vibecoded-apps-leaderboard/vibeboard`.
-  const depths = new Map(projects.map((p) => [p, 1]));
-
-  const relabel = () => {
-    for (const p of projects) {
-      p.label = pathSegments(p.cwd).slice(-depths.get(p)).join("/") || p.key;
-    }
-  };
-
-  relabel();
-
-  for (let round = 0; round < 4; round++) {
-    const byLabel = new Map();
-    for (const p of projects) {
-      if (!byLabel.has(p.label)) byLabel.set(p.label, []);
-      byLabel.get(p.label).push(p);
-    }
-
-    const clashing = [...byLabel.values()].filter((group) => group.length > 1);
-    if (clashing.length === 0) return projects;
-
-    let widened = false;
-    for (const group of clashing) {
-      for (const p of group) {
-        const segments = pathSegments(p.cwd).length;
-        if (depths.get(p) < segments) {
-          depths.set(p, depths.get(p) + 1);
-          widened = true;
-        }
-      }
-    }
-
-    // Two different sessions can record the identical path; widening further
-    // would loop forever.
-    if (!widened) break;
-    relabel();
-  }
-
-  // Still ambiguous after four segments: fall back to a suffix so the picker
-  // never shows two rows a person cannot tell apart.
-  const seen = new Map();
-  for (const p of projects) {
-    const n = (seen.get(p.label) ?? 0) + 1;
-    seen.set(p.label, n);
-    if (n > 1) p.label = `${p.label} (${n})`;
-  }
-  return projects;
 }
 
 function collectEvents() {
@@ -262,6 +215,17 @@ function addUsage(target, usage) {
   target.totalTokens += input + output + cacheCreation + cacheRead;
 }
 
+/** Same four fields as addUsage, summed to one number — what a session's
+ * cost-sharing math actually divides by. */
+function usageDelta(usage) {
+  return (
+    (usage.input_tokens ?? 0) +
+    (usage.output_tokens ?? 0) +
+    (usage.cache_creation_input_tokens ?? 0) +
+    (usage.cache_read_input_tokens ?? 0)
+  );
+}
+
 /* ======================
    COST (via ccusage)
 ====================== */
@@ -325,35 +289,48 @@ async function main() {
     process.exit(1);
   }
 
-  const groups = new Map();
-  /** sessionId -> total tokens across every project that session touched. */
+  const cwd = process.cwd();
+  const rootKey = projectKeyFor(cwd);
+
+  // Exactly one bucket, not one per distinct `cwd` seen on the machine — the
+  // report is scoped to the folder this command was run from (and anything
+  // nested under it), so there's nothing to pick between on the submit page.
+  let scoped = null;
+  /** sessionId -> total tokens across every project that session touched,
+   * in or out of scope — needed below to split a session's cost by its
+   * *whole* footprint, not just the part that happened in this folder. */
   const sessionTotals = new Map();
 
   for (const event of events) {
-    const key = projectKeyFor(event.cwd);
-    let group = groups.get(key);
+    let delta = 0;
+    if (event.usage && event.sessionId) {
+      delta = usageDelta(event.usage);
+      sessionTotals.set(
+        event.sessionId,
+        (sessionTotals.get(event.sessionId) ?? 0) + delta,
+      );
+    }
 
-    if (!group) {
-      group = {
-        key,
-        label: folderName(event.cwd),
-        cwd: event.cwd,
+    if (!isWithinRoot(event.cwd, rootKey)) continue;
+
+    if (!scoped) {
+      scoped = {
         events: [],
         sessionIds: new Set(),
         tokens: emptyTokens(),
         byModel: new Map(),
-        // Tokens this project drew from each session it appears in. One
-        // session can span several directories, so cost has to be split.
+        // Tokens *this* folder drew from each session it appears in. A
+        // session that also touched other directories only gets charged its
+        // share here, not the whole thing.
         tokensBySession: new Map(),
       };
-      groups.set(key, group);
     }
 
-    group.events.push(event);
-    if (event.sessionId) group.sessionIds.add(event.sessionId);
+    scoped.events.push(event);
+    if (event.sessionId) scoped.sessionIds.add(event.sessionId);
 
     if (event.usage) {
-      addUsage(group.tokens, event.usage);
+      addUsage(scoped.tokens, event.usage);
 
       // Claude Code tags a few internal, non-billed turns (auto-compaction,
       // interrupts) with model "<synthetic>" and a zero-valued usage object.
@@ -361,31 +338,28 @@ async function main() {
       // counting it inflated "models used" by one with nothing to show for it.
       const model = event.model ?? "unknown";
       if (model !== "<synthetic>") {
-        if (!group.byModel.has(model)) group.byModel.set(model, emptyTokens());
-        addUsage(group.byModel.get(model), event.usage);
+        if (!scoped.byModel.has(model)) scoped.byModel.set(model, emptyTokens());
+        addUsage(scoped.byModel.get(model), event.usage);
       }
 
       if (event.sessionId) {
-        const before = group.tokensBySession.get(event.sessionId) ?? 0;
-        const usage = event.usage;
-        const delta =
-          (usage.input_tokens ?? 0) +
-          (usage.output_tokens ?? 0) +
-          (usage.cache_creation_input_tokens ?? 0) +
-          (usage.cache_read_input_tokens ?? 0);
-        group.tokensBySession.set(event.sessionId, before + delta);
-
-        sessionTotals.set(
-          event.sessionId,
-          (sessionTotals.get(event.sessionId) ?? 0) + delta,
-        );
+        const before = scoped.tokensBySession.get(event.sessionId) ?? 0;
+        scoped.tokensBySession.set(event.sessionId, before + delta);
       }
     }
   }
 
+  if (!scoped) {
+    process.stderr.write(
+      `No Claude Code sessions found for this folder:\n  ${cwd}\n\n` +
+        "Run this from the project you're actually submitting — the same folder (or a parent of it) you had open in Claude Code while building it.\n",
+    );
+    process.exit(1);
+  }
+
   const costBySession = await runCcusage();
 
-  const projects = [...groups.values()]
+  const projects = [scoped]
     .map((group) => {
       const time = measureTime(group.events);
       const sessionIds = [...group.sessionIds];
@@ -422,10 +396,7 @@ async function main() {
       }
 
       return {
-        label: group.label,
-        // Kept only for label disambiguation below; stripped before output so
-        // no filesystem path leaves the machine.
-        cwd: group.cwd,
+        label: folderName(cwd),
         sessionCount: sessionIds.length,
         messageCount: group.events.length,
         ...time,
@@ -442,11 +413,10 @@ async function main() {
         sessionIds,
       };
     })
-    .filter((project) => project.tokens.totalTokens > 0)
-    .sort((a, b) => Date.parse(b.lastActivity) - Date.parse(a.lastActivity));
-
-  disambiguateLabels(projects);
-  for (const project of projects) delete project.cwd;
+    // Only ever one entry, but a build with genuinely nothing billable in it
+    // (a session that touched this folder without any usage) shouldn't be
+    // reported as a listing.
+    .filter((project) => project.tokens.totalTokens > 0);
 
   const payload = {
     tool: "vibescore-cli",
@@ -458,26 +428,26 @@ async function main() {
     projects,
   };
 
+  if (projects.length === 0) {
+    process.stderr.write(
+      `Found Claude Code activity for this folder, but no billable usage in it — nothing to report.\n`,
+    );
+    process.exit(1);
+  }
+
   // Summary on stderr so it stays visible even when stdout is piped to the
   // clipboard — otherwise you paste a payload you have never seen.
+  const p = projects[0];
+  const cost = p.totalCost === null ? "cost n/a" : `$${p.totalCost.toFixed(2)}`;
   const lines = [
     "",
-    `  Found ${projects.length} project${projects.length === 1 ? "" : "s"} in ~/.claude/projects`,
-    "",
+    `  ${p.label.padEnd(28).slice(0, 28)} ${String(p.activeMinutes + "m active").padStart(12)} ` +
+      `${String(Math.round(p.wallMinutes / 60) + "h wall").padStart(9)}  ${cost}`,
   ];
-  for (const p of projects.slice(0, 12)) {
-    const cost =
-      p.totalCost === null ? "cost n/a" : `$${p.totalCost.toFixed(2)}`;
-    lines.push(
-      `  ${p.label.padEnd(28).slice(0, 28)} ${String(p.activeMinutes + "m active").padStart(12)} ` +
-        `${String(Math.round(p.wallMinutes / 60) + "h wall").padStart(9)}  ${cost}`,
-    );
-  }
-  if (projects.length > 12) lines.push(`  … and ${projects.length - 12} more`);
   if (!costBySession) {
     lines.push(
       "",
-      "  ccusage could not be run, so costs are missing. Everything else is fine.",
+      "  ccusage could not be run, so cost is missing. Everything else is fine.",
     );
   }
   lines.push("", "  JSON written to stdout — paste it on the submit page.", "");

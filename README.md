@@ -4,32 +4,39 @@ Measure what a Claude Code project actually cost to build, then list it on
 [VibeScore](https://vibescore.dev).
 
 ```bash
+cd your-project
 npx --yes vibescore-cli | pbcopy          # macOS
 npx --yes vibescore-cli | Set-Clipboard   # Windows PowerShell
 npx --yes vibescore-cli | xclip -selection clipboard   # Linux
 ```
 
-Paste the result on the submit page. A human-readable summary is printed to
-stderr, so you still see what you are about to paste even when stdout is piped
-to the clipboard.
+Run it from the project you're submitting. Paste the result on the submit
+page. A human-readable summary is printed to stderr, so you still see what you
+are about to paste even when stdout is piped to the clipboard.
 
 ## What it reads
 
 Claude Code already keeps a transcript of every session in
-`~/.claude/projects`. This reads those files and reports one entry per project.
+`~/.claude/projects`. This reads those files and reports on one project: the
+folder you ran the command from, and anything nested under it — every
+transcript line carries the `cwd` it was written from, so that's exact, not a
+guess. Nothing to pick from a list of every project you've ever built.
 
 Cost comes from [ccusage](https://github.com/ryoppippi/ccusage), which
-maintains the per-model price table; the two are joined on session id. If
-ccusage cannot be run, everything else is still reported and cost comes back
-as `null` rather than `0` — an unknown cost and a free build are different
-claims to put on a listing.
+maintains the per-model price table; the two are joined on session id.
+Computing it reads every transcript on the machine, not just this project's —
+a session that touched several directories has its cost split by each one's
+share of that session's tokens, which needs the session's whole footprint to
+get right. If ccusage cannot be run, everything else is still reported and
+cost comes back as `null` rather than `0` — an unknown cost and a free build
+are different claims to put on a listing.
 
 ## Why not just ccusage
 
 ccusage reports token usage per session, which leaves two gaps:
 
 - **It doesn't say which project a session belonged to.** Every transcript line
-  carries `cwd`, so grouping here is exact rather than you picking session ids
+  carries `cwd`, so scoping here is exact rather than you picking session ids
   off a list.
 - **It only records when a session *ended*.** Transcript lines carry a
   timestamp each, so a build has a real start and end — including a
@@ -53,10 +60,9 @@ time. Both are true; they just measure different things.
 Nothing is uploaded. The command writes to stdout and you choose what to do
 with it.
 
-Filesystem paths are deliberately **not** included in the output — only a
-project's folder name, widened to `parent/folder` only when two projects would
-otherwise be indistinguishable. Pasting a report does not disclose your
-directory layout.
+Filesystem paths are deliberately **not** included in the output — only the
+project's bare folder name. Pasting a report does not disclose your directory
+layout.
 
 The payload contains: folder label, session ids, message count, first/last
 activity, wall-clock and active minutes, token counts per model, and cost.
