@@ -1,6 +1,6 @@
 {
   "name": "vibescore-cli",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Measure what a Claude Code project actually cost to build, for listing on VibeScore.",
   "type": "module",
   "repository": {
