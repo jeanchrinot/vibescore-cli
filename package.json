@@ -3,12 +3,21 @@
   "version": "0.2.0",
   "description": "Measure what a Claude Code project actually cost to build, for listing on VibeScore.",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jeanchrinot/vibescore-cli.git"
+  },
+  "homepage": "https://github.com/jeanchrinot/vibescore-cli#readme",
+  "bugs": {
+    "url": "https://github.com/jeanchrinot/vibescore-cli/issues"
+  },
   "bin": {
     "vibescore-report": "index.mjs"
   },
   "files": [
     "index.mjs",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=18"
